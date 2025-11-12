@@ -45,15 +45,21 @@ jobs:
           echo ""
           echo "If you did not authorize this push, investigate immediately."
 
+      - name: Capture timestamp (UTC)
+        id: ts
+        run: echo "utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
       # -----------------------------------------------------------
       # 2. Send Discord alert
       # -----------------------------------------------------------
       - name: Send Discord alert
         if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          UTC_NOW: ${{ steps.ts.outputs.utc }}
         uses: Ilshidur/action-discord@0.4.0
         with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          message: |
+          args: |
             🚨 **PUSH DETECTED — `${{ github.repository }}`**
             ───────────────────────────────
             **🧑‍💻 Actor:** `${{ github.actor }}`
@@ -66,7 +72,7 @@ jobs:
             **🔗 Compare:** [View Diff](${{ github.event.compare }})
             **📄 Workflow Run:** [View Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
             **🌐 Triggered By:** [${{ github.event.sender.login }}](${{ github.event.sender.html_url }})
-            **⏱️ Detected At (UTC):** $(date -u)
+            **⏱️ Detected At (UTC):** {{ UTC_NOW }}
             ───────────────────────────────
             ⚠️ *Investigate immediately if this push was not authorized.*
 
@@ -90,12 +96,14 @@ jobs:
       # -----------------------------------------------------------
       - name: Send success confirmation
         if: success()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          UTC_NOW: ${{ steps.ts.outputs.utc }}
         uses: Ilshidur/action-discord@0.4.0
         with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          message: |
+          args: |
             ✅ **Push Alert Executed — `${{ github.repository }}`**
             **Branch:** `${{ github.ref_name }}`
             **Actor:** `${{ github.actor }}`
-            **Time (UTC):** $(date -u)
+            **Time (UTC):** {{ UTC_NOW }}
             Workflow executed successfully and metadata was archived.
