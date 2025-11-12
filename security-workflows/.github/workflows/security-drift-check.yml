@@ -1,0 +1,120 @@
+name: 🕵️ Nightly Security Drift Check (Reusable)
+
+# ---------------------------------------------------------------
+# To use it in another repo:
+#
+# jobs:
+#   call-drift-check:
+#     uses: charbel-security/security-workflows/.github/workflows/security-drift-check.yml@main
+#     secrets:
+#       DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+# ---------------------------------------------------------------
+
+on:
+  workflow_call:
+    secrets:
+      DISCORD_WEBHOOK:
+        required: true
+
+jobs:
+  driftcheck:
+    name: Detect Unauthorized Config Changes
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------
+      # 1. Checkout repo contents
+      # -----------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # -----------------------------------------------------------
+      # 2. Collect all configuration files to monitor
+      # -----------------------------------------------------------
+      - name: Collect monitored files
+        id: files
+        run: |
+          echo "Finding *.config.mjs, *.config.js, *.config.ts files..."
+          find . -type f \( -name "*.config.mjs" -o -name "*.config.js" -o -name "*.config.ts" \) > monitored.txt
+          echo "Monitored files:"
+          cat monitored.txt || echo "No config files found."
+
+      # -----------------------------------------------------------
+      # 3. Create baseline (first run) or compare existing hashes
+      # -----------------------------------------------------------
+      - name: Compare current state with baseline
+        id: drift
+        run: |
+          mkdir -p .security_baseline
+          HASHFILE=".security_baseline/checksums.txt"
+
+          if [ ! -f "$HASHFILE" ]; then
+            echo "🆕 Creating initial checksum baseline."
+            sha256sum $(cat monitored.txt) > "$HASHFILE"
+            echo "Baseline saved."
+            echo "new_baseline=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Comparing file checksums with baseline..."
+          sha256sum --check "$HASHFILE" > drift_report.txt || true
+          echo "---- Drift Report ----"
+          cat drift_report.txt || true
+          echo "----------------------"
+
+          jq -n --slurpfile report <(cat drift_report.txt | grep -E 'FAILED|OK') \
+             '{timestamp: (now | strftime("%Y-%m-%dT%H:%M:%SZ")), result: $report}' \
+             > drift_summary.json
+
+          if grep -q "FAILED" drift_report.txt; then
+            echo "file_drift_detected=true" >> $GITHUB_OUTPUT
+          else
+            echo "file_drift_detected=false" >> $GITHUB_OUTPUT
+          fi
+
+      # -----------------------------------------------------------
+      # 4. Upload artifacts (baseline + report)
+      # -----------------------------------------------------------
+      - name: Upload drift artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly_drift_report
+          path: |
+            drift_report.txt
+            drift_summary.json
+            .security_baseline/checksums.txt
+
+      # -----------------------------------------------------------
+      # 5. Send alert if drift detected
+      # -----------------------------------------------------------
+      - name: Send Discord alert on drift
+        if: steps.drift.outputs.file_drift_detected == 'true'
+        uses: Ilshidur/action-discord@v2
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          message: |
+            ⚠️ **Unauthorized File Change Detected — `${{ github.repository }}`**
+            ───────────────────────────────
+            **🕒 Checked At (UTC):** $(date -u)
+            **📄 Drift Report:** [View Run Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            ───────────────────────────────
+            One or more configuration files have changed unexpectedly:
+            > Monitored patterns: `*.config.mjs`, `*.config.js`, `*.config.ts`
+            ⚠️ Investigate immediately — this could indicate tampering or injection.
+
+      # -----------------------------------------------------------
+      # 6. Optional: Send clean report confirmation
+      # -----------------------------------------------------------
+      - name: Send OK message (no drift)
+        if: steps.drift.outputs.file_drift_detected == 'false' && steps.drift.outputs.new_baseline != 'true'
+        uses: Ilshidur/action-discord@v2
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          message: |
+            ✅ **No Drift Detected — `${{ github.repository }}`**
+            **Time (UTC):** $(date -u)
+            All configuration files match their baseline integrity.
+            Patterns monitored: `*.config.mjs`, `*.config.js`, `*.config.ts`
