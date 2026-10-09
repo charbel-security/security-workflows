@@ -1,109 +1,113 @@
 name: 🔔 Push Activity Alert (Reusable)
 
-# ---------------------------------------------------------------
-# This workflow is reusable across any repo inside your org.
-# To call it, use:
-#
-# jobs:
-#   call-push-alert:
-#     uses: charbel-security/security-workflows/.github/workflows/push-alert.yml@main
-#     secrets:
-#       DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-# ---------------------------------------------------------------
-
 on:
   workflow_call:
     secrets:
       DISCORD_WEBHOOK:
         required: true
 
+permissions: {}
+
 jobs:
   push-alert:
     name: Push Activity Monitor
     runs-on: ubuntu-latest
-
+    timeout-minutes: 5
     steps:
-      # -----------------------------------------------------------
-      # 1. Log push information to the Actions console
-      # -----------------------------------------------------------
-      - name: Log push details
-        run: |
-          echo "🔍 Push Detected!"
-          echo "Repository: ${{ github.repository }}"
-          echo "Actor: ${{ github.actor }}"
-          echo "Ref: ${{ github.ref }}"
-          echo "Branch: ${{ github.ref_name }}"
-          echo "Commit SHA: ${{ github.sha }}"
-          echo "Commit Message: ${{ github.event.head_commit.message }}"
-          echo "Compare URL: ${{ github.event.compare }}"
-          echo "Pusher: ${{ github.event.pusher.name }} <${{ github.event.pusher.email }}>"
-          echo "Author: ${{ github.event.head_commit.author.name }} <${{ github.event.head_commit.author.email }}>"
-          echo "Commit Timestamp: ${{ github.event.head_commit.timestamp }}"
-          echo "Workflow Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          echo "Triggered By: ${{ github.event.sender.html_url }}"
-          echo "UTC Timestamp: $(date -u)"
-          echo ""
-          echo "If you did not authorize this push, investigate immediately."
-
-      - name: Capture timestamp (UTC)
-        id: ts
-        run: echo "utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
-
-      # -----------------------------------------------------------
-      # 2. Send Discord alert
-      # -----------------------------------------------------------
-      - name: Send Discord alert
-        if: always()
+      - name: Send Discord push alert
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          UTC_NOW: ${{ steps.ts.outputs.utc }}
-        uses: Ilshidur/action-discord@0.4.0
-        with:
-          args: |
-            🚨 **PUSH DETECTED — `${{ github.repository }}`**
-            ───────────────────────────────
-            **🧑‍💻 Actor:** `${{ github.actor }}`
-            **🌿 Branch:** `${{ github.ref_name }}`
-            **💬 Commit:** `${{ github.sha }}`
-            **🕒 Commit Time (UTC):** `${{ github.event.head_commit.timestamp }}`
-            **🧠 Author:** `${{ github.event.head_commit.author.name }} <${{ github.event.head_commit.author.email }}>`
-            **📨 Pusher:** `${{ github.event.pusher.name }} <${{ github.event.pusher.email }}>`
-            **💬 Message:** `${{ github.event.head_commit.message }}`
-            **🔗 Compare:** [View Diff](${{ github.event.compare }})
-            **📄 Workflow Run:** [View Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            **🌐 Triggered By:** [${{ github.event.sender.login }}](${{ github.event.sender.html_url }})
-            **⏱️ Detected At (UTC):** {{ UTC_NOW }}
-            ───────────────────────────────
-            ⚠️ *Investigate immediately if this push was not authorized.*
-
-      # -----------------------------------------------------------
-      # 3. Archive raw event data for forensic review
-      # -----------------------------------------------------------
-      - name: Save event payload
         run: |
-          mkdir -p artifacts
-          echo '${{ toJson(github.event) }}' > artifacts/push_event.json
-        continue-on-error: true
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import re
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
 
-      - name: Upload push metadata
-        uses: actions/upload-artifact@v4
-        with:
-          name: push_event_metadata
-          path: artifacts/push_event.json
+          webhook = os.environ.get('DISCORD_WEBHOOK', '')
+          if not webhook:
+              raise SystemExit('DISCORD_WEBHOOK is empty or unavailable')
+          parts = urllib.parse.urlsplit(webhook)
+          if (parts.scheme != 'https' or
+                  parts.netloc not in ('discord.com', 'discordapp.com') or
+                  not re.fullmatch(r'/api(?:/v\d+)?/webhooks/\d+/[^/]+', parts.path)):
+              raise SystemExit('DISCORD_WEBHOOK must be a Discord HTTPS webhook URL')
+          if os.environ.get('GITHUB_EVENT_NAME') != 'push':
+              raise SystemExit('Push alert must be called by a push event')
 
-      # -----------------------------------------------------------
-      # 4. Optional confirmation message
-      # -----------------------------------------------------------
-      - name: Send success confirmation
-        if: success()
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          UTC_NOW: ${{ steps.ts.outputs.utc }}
-        uses: Ilshidur/action-discord@0.4.0
-        with:
-          args: |
-            ✅ **Push Alert Executed — `${{ github.repository }}`**
-            **Branch:** `${{ github.ref_name }}`
-            **Actor:** `${{ github.actor }}`
-            **Time (UTC):** {{ UTC_NOW }}
-            Workflow executed successfully and metadata was archived.
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as event_file:
+              event = json.load(event_file)
+
+          def clean(value, limit):
+              value = re.sub(r'[\x00-\x1f\x7f]+', ' ', str(value or '')).strip()
+              return value if len(value) <= limit else value[:limit - 1] + '…'
+
+          repository = os.environ['GITHUB_REPOSITORY']
+          actor = clean(os.environ.get('GITHUB_ACTOR'), 100)
+          ref = clean(event.get('ref') or os.environ.get('GITHUB_REF'), 200)
+          action = ('deleted' if event.get('deleted') else
+                    'created' if event.get('created') else
+                    'force-pushed' if event.get('forced') else 'updated')
+          candidate = event.get('before') if event.get('deleted') else event.get('after')
+          sha = (candidate if isinstance(candidate, str) and
+                 re.fullmatch(r'[0-9a-fA-F]{40}', candidate) and
+                 candidate != '0' * 40 else 'unknown')
+          head = event.get('head_commit') or {}
+          message = clean(head.get('message') or '(no head commit)', 500)
+          run_url = f"https://github.com/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          compare = event.get('compare') or ''
+          compare_parts = urllib.parse.urlsplit(compare)
+          compare_url = (compare if compare_parts.scheme == 'https'
+                         and compare_parts.netloc == 'github.com'
+                         and compare_parts.path.startswith(f'/{repository}/compare/')
+                         else run_url)
+          detected_at = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+          content = '\n'.join([
+              '🚨 GitHub push activity',
+              f'Repository: {repository}',
+              f'Actor: {actor}',
+              f'Ref: {ref} ({action})',
+              f'Commit: {sha}',
+              f'Message: {message}',
+              f'Compare: {compare_url}',
+              f'Workflow run: {run_url}',
+              f'Detected: {detected_at}',
+              'Investigate if this push was not authorized.',
+          ])
+          if len(content) > 1900:
+              content = content[:1899] + '…'
+
+          query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+          query['wait'] = 'true'
+          url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path,
+                                        urllib.parse.urlencode(query), ''))
+          payload = json.dumps({
+              'content': content,
+              'allowed_mentions': {'parse': []},
+          }).encode('utf-8')
+          request = urllib.request.Request(
+              url, data=payload, headers={'Content-Type': 'application/json'},
+              method='POST')
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, msg, headers, newurl):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect)
+          for attempt in range(3):
+              try:
+                  with opener.open(request, timeout=15) as response:
+                      if not 200 <= response.status < 300:
+                          raise SystemExit(f'Discord alert failed (HTTP {response.status})')
+                  break
+              except urllib.error.HTTPError as error:
+                  if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                      raise SystemExit(f'Discord alert failed (HTTP {error.code})') from None
+              except (urllib.error.URLError, TimeoutError):
+                  if attempt == 2:
+                      raise SystemExit('Discord alert failed (network error)') from None
+              time.sleep(2 ** attempt)
+          print(f'Push alert delivered for {repository} ({action}); run: {run_url}')
+          PY
