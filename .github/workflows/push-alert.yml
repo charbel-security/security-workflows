@@ -110,7 +110,7 @@ jobs:
               'allowed_mentions': {'parse': []},
           }).encode('utf-8')
           request = urllib.request.Request(
-              url, data=payload, headers={'Content-Type': 'application/json'},
+              url, data=payload, headers={'Content-Type': 'application/json', 'User-Agent': 'DiscordBot (https://github.com/charbel-security/security-workflows, 1.0)'},
               method='POST')
 
           class NoRedirect(urllib.request.HTTPRedirectHandler):
